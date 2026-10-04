@@ -71,3 +71,30 @@ def test_or_retry_never_surfaces_rewound_rows(db):
 
     snippets = " ".join(str(r.get("snippet", "")) for r in result["results"])
     assert "rewound duplicate" not in snippets
+
+
+def test_retry_guard_matches_first_pass_for_new_reset_predecessor(tmp_path):
+    """Review follow-up (PR #130562): a /new-reset predecessor (rows active=1, lineage
+    root same, end_reason='session_reset') must surface through the OR retry exactly as
+    it does through the first pass — the retry guard mirrors `_session_left_live_context
+    OR is_compacted_hit`, not compacted alone."""
+    import sys
+    sys.path.insert(0, ".")
+    from hermes_state import SessionDB
+    from tools.session_search_tool import _discover
+
+    db = SessionDB(tmp_path / "state.db")
+    # predecessor session with an OR-spanning match, reset out of live context
+    db.create_session("s_old", source="cli")
+    db.append_message("s_old", "user", "balancer obsession ORIGIN STORY first entry")
+    db.append_message("s_old", "assistant", "ok")
+    db.end_session("s_old", end_reason="session_reset")
+    # current session carries a query-echo row that satisfies the AND (forces the retry)
+    db.create_session("s_new", source="cli")
+    db.append_message("s_new", "user", "ORIGIN STORY")
+
+    payload = _discover(db, "ORIGIN STORY balancer", role_filter=None, limit=20, sort=None,
+                        detail="compact", current_session_id="s_new")
+    data = json.loads(payload) if isinstance(payload, str) else payload
+    hit_ids = {h["session_id"] for h in data["results"]}
+    assert "s_old" in hit_ids, data

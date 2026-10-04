@@ -471,20 +471,26 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
                         if raw_sid in excluded_roots or resolved_sid in excluded_roots:
                             continue
                         is_compacted_hit = _is_compacted_message(db, r.get("id"))
-                        # Own-lineage live rows stay hidden (same guard); ONLY archived rows
-                        # (compacted=1) of the current lineage may surface — those left live
-                        # context by construction (archive_and_compact), so check the flag
-                        # directly instead of _session_left_live_context.
-                        if current_lineage_root and resolved_sid == current_lineage_root and not is_compacted_hit:
+                        # Own-lineage guard mirrors the first pass exactly: live rows stay
+                        # hidden unless the session LEFT live context (a /new reset left the
+                        # rows active=1 but out of the live window) or the hit is an archived
+                        # (compacted=1) row. Keeping the routes in agreement means a hit does
+                        # not depend on which path fired.
+                        if current_lineage_root and resolved_sid == current_lineage_root and not (
+                                _session_left_live_context(db, resolved_sid) or is_compacted_hit):
                             continue
-                        if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
+                        if current_session_id and raw_sid == current_session_id and not (
+                                _session_left_live_context(db, raw_sid) or is_compacted_hit):
                             continue
                         if resolved_sid in relaxed_seen_sessions:
                             continue
                         relaxed_seen_sessions.add(resolved_sid)
                         seen_relaxed[resolved_sid] = {**r, "_lineage_root": resolved_sid}
                     for lineage_root, match_info in seen_relaxed.items():
-                        entry = _hydrate_hit(db, lineage_root, match_info, "compact")
+                        # Same detail policy as the first pass: full when asked (or when
+                        # there is nothing to compact around); the retry must not silently
+                        # downgrade the schema's bookend promise.
+                        entry = _hydrate_hit(db, lineage_root, match_info, "full" if detail == "full" or not results else "compact")
                         if entry is not None:
                             entry["link"] = _session_link(entry["session_id"], link_profile)
                             results.append(entry)
