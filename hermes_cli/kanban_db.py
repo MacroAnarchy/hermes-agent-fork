@@ -447,6 +447,9 @@ def current_board_path() -> Path:
     return kanban_home() / "kanban" / "current"
 
 
+_PROFILE_BOARD_PIN_CACHE: dict = {"key": None, "value": ""}
+
+
 def _active_profile_board_pin() -> str:
     """Board pinned by the ACTIVE profile's ``.env`` (``HERMES_KANBAN_BOARD``), or ``""``.
 
@@ -455,7 +458,9 @@ def _active_profile_board_pin() -> str:
     call made while a profile's session is active would otherwise resolve the board from
     the shared ``<root>/kanban/current`` — cross-routing cards onto another team's board.
     The session ContextVar names the active profile; read its pin from the same
-    ``profiles/<name>/.env`` the CLI child loads.
+    ``profiles/<name>/.env`` the CLI child loads, with the SAME parser (python-dotenv,
+    utf-8-sig) so one file can never route differently in-process than in a CLI child.
+    Cached by (path, mtime, size) — this sits on dispatcher tick and kanban tool hot paths.
     """
     try:
         from gateway.session_context import get_session_env
@@ -465,16 +470,28 @@ def _active_profile_board_pin() -> str:
     if not profile or profile == "default":
         return ""
     try:
-        env_path = kanban_home() / "profiles" / profile / ".env"
+        from hermes_cli.profiles import get_profile_dir
+        env_path = get_profile_dir(profile) / ".env"
         if not env_path.is_file():
             return ""
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line.startswith("HERMES_KANBAN_BOARD="):
-                return line.split("=", 1)[1].strip().strip('"\'')
-    except OSError:
+        stat = env_path.stat()
+        cache_key = (str(env_path), stat.st_mtime_ns, stat.st_size)
+        if _PROFILE_BOARD_PIN_CACHE["key"] == cache_key:
+            return _PROFILE_BOARD_PIN_CACHE["value"]
+        try:
+            # Same read discipline as hermes_cli/env_loader: utf-8-sig strips a BOM that
+            # raw dotenv_values would otherwise glue onto the key name.
+            from dotenv import dotenv_values
+            text = env_path.read_bytes().decode("utf-8-sig", errors="replace")
+            import io as _io
+            value = str(dotenv_values(stream=_io.StringIO(text)).get("HERMES_KANBAN_BOARD") or "").strip()
+        except ImportError:  # pragma: no cover - dotenv is a hard dependency of env_loader
+            value = ""
+        _PROFILE_BOARD_PIN_CACHE["key"] = cache_key
+        _PROFILE_BOARD_PIN_CACHE["value"] = value
+        return value
+    except Exception:
         return ""
-    return ""
 
 
 def get_current_board() -> str:
